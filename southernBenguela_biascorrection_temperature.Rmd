@@ -1,0 +1,213 @@
+---
+title: "Creating bias-corrected time series of sea temperature"
+author: "Kelly Ortega based on Denisse Fierro- Arcos script"
+date: "2024-10-24"
+output: html_document
+---
+In this notebook, we describe the process to create time series of bias corrected temperature following the guidelines from Ortega-Cisneros et al., (2024).
+
+We will use data data downloaded from our FishMIP Input Explorer app, specifically, the data from the 'Model outputs against observations' tab for three case study regions. The data is downloaded as a folder containing four files. You will need to unzip the folder before running this script to access the .parquet files.
+
+#Loading relevant libraries
+
+```{r setup, include=FALSE}
+.libPaths("/home/user/R/x86_64-pc-linux-gnu-library/4.3")
+library(nanoparquet)
+library(dplyr)
+library(Rarr)
+library(tidyr)
+library(raster)
+library(sf)
+library(tibble)
+library(ggplot2)
+library(lubridate)
+```
+
+### Defining the location to the input files
+```{r}
+inputpath <- ("~/Documents/Fish-MIP/scripts/3a_paper_revised/temp_sbenguela_atlantis/")
+```
+
+### Loading parquet files for the Hawai'i based longline fishery downloaded from the FishMIP THREDDS server 
+```{r }
+sb_g <- read_parquet(paste0(inputpath,"gfdl-mom6-cobalt2_obsclim_thetao_15arcmin_southern-benguela_mthly_clim_mean_1981_2010.parquet"))
+sb_woa <- read_parquet(paste0(inputpath,"regridded_woa_southern-benguela_month_clim_mean_temp_1981-2010.parquet"))
+sb_areacello <- read_parquet(paste0(inputpath,"gfdl-mom6-cobalt2_areacello_15arcmin_southern-benguela_fixed.parquet"))
+sb_depth <- read_parquet(paste0(inputpath,"gfdl-mom6-cobalt2_obsclim_deptho_15arcmin_southern-benguela_fixed.parquet")) 
+```
+
+### Exploring file contents
+```{r }
+parquet_column_types(sb_g)
+parquet_column_types(sb_woa)
+parquet_column_types(sb_areacello)
+parquet_column_types(sb_depth)
+```
+
+### Wrangling temperature data to calculate climatologies for the whole model area
+```{r }
+#Plotting temperature data for the upper most layer from GFDL
+sb_g |>
+  filter(depth == min(depth)) |>
+  ggplot(aes(lon, lat, fill = vals)) +
+  geom_tile()
+
+# Calculating GFDL climatologies from 1981-2010
+sb_g_clim <-sb_g |>
+  filter(depth < 51) |>
+  rename(temperature = vals) |>
+  drop_na(temperature) |>
+  group_by(lat, lon, month) |>
+  mutate(w_temp = weighted.mean(temperature, depth, na.rm= TRUE)) |>
+  full_join(sb_areacello, by = c("lat","lon")) |>
+  rename(area = vals) |>
+  group_by(month) |>
+  transmute(wad_temp = weighted.mean(w_temp, area, na.rm = TRUE)) |>
+  distinct()
+
+#Plotting temperature data for the upper most layer from WOA climatology
+sb_woa |>
+  filter(depth == min(depth)) |>
+  ggplot(aes(lon, lat, fill = vals)) +
+  geom_tile()
+
+# Calculating WOA climatologies from 1981-2010 for the 0-20 m depth layer or realm of this model
+sb_w_clim <-sb_woa |>
+  filter(depth < 51) |>
+  rename(temperature = vals) |>
+  drop_na(temperature) |>
+  group_by(lat, lon, month) |>
+  mutate(w_temp = weighted.mean(temperature, depth, na.rm= TRUE)) |>
+  full_join(sb_areacello, by = c("lat","lon")) |>
+  rename(area = vals) |>
+  drop_na(w_temp, area) %>%
+  group_by(month) |>
+  transmute(wad_temp = weighted.mean(w_temp, area, na.rm = TRUE)) |>
+  distinct()
+
+```
+
+### Loading GFDL obsclim Zarr file downloaded from the FishMIP Input Explorer app for the southern Benguela 
+```{r}
+sb_temp <- paste0(inputpath,"gfdl-mom6-cobalt2_obsclim_thetao_15arcmin_southern-benguela_monthly_1961_2010.zarr")
+```
+
+### Exploring zarr file contents
+```{r }
+zarr_overview(sb_temp)
+
+  # Path: thetao
+  # Shape: 600 x 35 x 36 x 55
+  # Chunk Shape: 600 x 5 x 36 x 55
+  # No. of Chunks: 7 (1 x 7 x 1 x 1)
+  # Data Type: float32
+  # Endianness: little
+  # Compressor: blosc
+```
+
+### Loading data
+
+We will add the variable name to the end of the `zarr` path we defined above to load all data.
+```{r }
+temp_data <- read_zarr_array(file.path(sb_temp, "thetao"))
+depth <- read_zarr_array(file.path(sb_temp, "depth_bin_m"))
+lat <- read_zarr_array(file.path(sb_temp, "lat"))
+lon <- read_zarr_array(file.path(sb_temp, "lon"))
+time <- read_zarr_array(file.path(sb_temp, "time"))
+```
+
+### Checking dimensions of temperature data
+
+```{r }
+dim(temp_data)
+#File dimensions are 600 (time) 35 (depth) 36 (lat)  55 (lon)
+
+#plot slice 1 for time and depth
+image(temp_data[1,1,,])
+```
+
+### Creating a data frame from all components
+
+Important to check dimensions of dataset. Note that dimensions need to match the order of dimensions in the temperature data
+```{r }
+temp_sb <- cbind(expand.grid(time, depth, lat, lon), val = as.vector(temp_data))
+
+#Rename the columns to reflect their contents
+names(temp_sb) <- c("time", "depth", "lat", "lon", "temperature")
+```
+
+### Calculate monthly temperature time series from GFDL obsclim
+
+```{r}
+#Process data for the upper 50 m depth layer 
+sb_gfdl <- temp_sb |> 
+  filter(depth < 51) |> 
+  drop_na(temperature) |>
+  mutate(date = as.Date("1961-01-01") %m+% months(round(time/30.417,0))) |>
+  group_by(lat, lon, date) |>
+  mutate(w_temp = weighted.mean(temperature, depth, na.rm= TRUE)) |>
+  full_join(sb_areacello, by = c("lat","lon")) |>
+  rename(area = vals) |>
+  group_by(date) |>
+  transmute(wad_temp = weighted.mean(temperature, area, na.rm= TRUE)) |>
+  distinct()
+
+#plot the temperature time series ranging from January 1961 to December 2010
+  ggplot(sb_gfdl, aes(date, wad_temp)) +
+  geom_line() +
+  labs(y = "Sea temperature 0- 50 m depth") +
+  theme_bw()
+```
+
+### Calculate bias corrected temperature time series 
+
+```{r}
+#Process data first depth bin to check we have process data correctly
+
+df_b_bc <- (sb_gfdl$wad_temp - sb_g_clim$wad_temp) + sb_w_clim$wad_temp
+t_sb_bc <- bind_cols(sb_gfdl$date, df_b_bc)
+colnames(t_sb_bc) <- c("date","bc_temp")
+
+#plot the temperature time series ranging from January 1961 to December 2010
+  ggplot(t_sb_bc, aes(date, bc_temp)) +
+  geom_line() +
+  geom_line(aes(sb_gfdl$date, sb_gfdl$wad_temp), color = 'blue') +
+  labs(y = "Sea temperature 0-50 m depth") +
+  theme_bw()
+  
+ #calculate differences between datasets
+ diff <- t_sb_bc$bc_temp - sb_gfdl$wad_temp
+ #print the monthly differences
+ head(diff, 12)
+```
+
+### Calculate climatologies for the model geometry 
+```{r }
+# Calculating GFDL time series from 1961-2010 at the lat lon point
+sb_g_clims <-temp_sb |>
+  filter(depth < 501) |> 
+  drop_na(temperature) |>
+  mutate(layer = case_when(depth <51 ~ 1, depth > 51 & depth < 101 ~ 2, depth > 100 & depth < 301 ~ 3, depth >300 ~ 4)) |>
+  mutate(date = as.Date("1961-01-01") %m+% months(round(time/30.417,0))) |>
+  group_by(lon, lat, date, layer) |> #may need to convert time into months by dividing by 30.417
+  transmute(w_temp = weighted.mean(temperature, depth, na.rm= TRUE)) |>
+  distinct()   |>
+  full_join(sb_areacello, by = c("lat","lon")) |>
+  rename(area = vals) 
+
+#Creating an sf object from dataframe
+dsf <- st_as_sf(sb_g_clims, coords = c("lon", "lat"))
+st_crs(dsf) <- "+proj=longlat +datum=WGS84 +no_defs"
+class(dsf)
+
+#Reading shapefile to perform data extraction for the model polygons
+cb <- st_read("~/Documents/abacus/Hydro/model_regions_v3_geo3.shp")
+plot(cb)
+box_id <- sort(as.numeric(paste(unique(cb$BOX_ID))))
+bxs <- as.numeric(as.vector(cb$BOX_ID))
+
+#Function needed that can work as extract on raster
+data_mean <- extract(dsf, cb, fun=weighted.mean(area), na.rm=T)
+
+```
+
