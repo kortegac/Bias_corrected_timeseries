@@ -16,7 +16,7 @@ library(nanoparquet)
 library(dplyr)
 library(Rarr)
 library(tidyr)
-library(raster)
+library(terra)
 library(sf)
 library(tibble)
 library(ggplot2)
@@ -25,15 +25,27 @@ library(lubridate)
 
 ### Defining the location to the input files
 ```{r}
-inputpath <- ("~/Documents/Fish-MIP/scripts/3a_paper_revised/temp_sbenguela_atlantis/")
+inputpath <- "~/Documents/Fish-MIP/scripts/3a_paper_revised/temp_sbenguela_atlantis/"
 ```
 
 ### Loading parquet files for the Hawai'i based longline fishery downloaded from the FishMIP THREDDS server 
 ```{r }
-sb_g <- read_parquet(paste0(inputpath,"gfdl-mom6-cobalt2_obsclim_thetao_15arcmin_southern-benguela_mthly_clim_mean_1981_2010.parquet"))
-sb_woa <- read_parquet(paste0(inputpath,"regridded_woa_southern-benguela_month_clim_mean_temp_1981-2010.parquet"))
-sb_areacello <- read_parquet(paste0(inputpath,"gfdl-mom6-cobalt2_areacello_15arcmin_southern-benguela_fixed.parquet"))
-sb_depth <- read_parquet(paste0(inputpath,"gfdl-mom6-cobalt2_obsclim_deptho_15arcmin_southern-benguela_fixed.parquet")) 
+sb_g <- file.path(
+  inputpath,
+  "gfdl-mom6-cobalt2_obsclim_thetao_15arcmin_southern-benguela_mthly_clim_mean_1981_2010.parquet") |> 
+  read_parquet()
+sb_woa <- file.path(
+  inputpath,
+  "regridded_woa_southern-benguela_month_clim_mean_temp_1981-2010.parquet") |> 
+  read_parquet()
+sb_areacello <- file.path(
+  inputpath,
+  "gfdl-mom6-cobalt2_areacello_15arcmin_southern-benguela_fixed.parquet") |> 
+  read_parquet()
+sb_depth <- file.path(
+  inputpath,
+  "gfdl-mom6-cobalt2_obsclim_deptho_15arcmin_southern-benguela_fixed.parquet") |> 
+  read_parquet() 
 ```
 
 ### Exploring file contents
@@ -52,18 +64,38 @@ sb_g |>
   ggplot(aes(lon, lat, fill = vals)) +
   geom_tile()
 
+#Calculating height of depth bins - This step is needed because the depth value
+#includes the depth of the water column up to that grid cell. If weighting by
+#depth, we should only include the depth for the grid cell (i.e., height of the
+#grid cell).
+depth_bins <- sb_g |> 
+  filter(depth < 51) |> 
+  distinct(depth) |> 
+  #Calculating the difference between each depth bin to get the height of the
+  #grid cell
+  mutate(depth_height = depth-lag(depth, default = 0))
+
+
 # Calculating GFDL climatologies from 1981-2010
-sb_g_clim <-sb_g |>
+sb_g_clim <- sb_g |>
+  #Keeping relevant columns only
+  select(lat:vals) |> 
   filter(depth < 51) |>
   rename(temperature = vals) |>
   drop_na(temperature) |>
-  group_by(lat, lon, month) |>
-  mutate(w_temp = weighted.mean(temperature, depth, na.rm= TRUE)) |>
-  full_join(sb_areacello, by = c("lat","lon")) |>
-  rename(area = vals) |>
+  #Adding height of grid cell
+  left_join(depth_bins, by = "depth") |> 
+  #Adding area of grid cell
+  left_join(sb_areacello, by = c("lat", "lon")) |> 
+  rename(area = vals) |> 
+  #Calculate volume of grid cell
+  mutate(volume = depth_height*area) |> 
+  select(!standard_name:units) |> 
   group_by(month) |>
-  transmute(wad_temp = weighted.mean(w_temp, area, na.rm = TRUE)) |>
-  distinct()
+  #Using volume as weights in mean calculation
+  summarise(w_temp_gfdl = weighted.mean(temperature, volume, na.rm = TRUE)) |> 
+  #Transforming month column to factor
+  mutate(month = factor(month, levels = month.name, ordered = T))
 
 #Plotting temperature data for the upper most layer from WOA climatology
 sb_woa |>
@@ -71,25 +103,35 @@ sb_woa |>
   ggplot(aes(lon, lat, fill = vals)) +
   geom_tile()
 
-# Calculating WOA climatologies from 1981-2010 for the 0-20 m depth layer or realm of this model
-sb_w_clim <-sb_woa |>
+# Calculating WOA climatologies from 1981-2010 for the 0-50 m depth layer or realm of this model
+sb_w_clim <- sb_woa |>
+  #Keeping relevant columns only
+  select(lat:vals) |> 
   filter(depth < 51) |>
   rename(temperature = vals) |>
   drop_na(temperature) |>
-  group_by(lat, lon, month) |>
-  mutate(w_temp = weighted.mean(temperature, depth, na.rm= TRUE)) |>
-  full_join(sb_areacello, by = c("lat","lon")) |>
-  rename(area = vals) |>
-  drop_na(w_temp, area) %>%
+  #Adding height of grid cell
+  left_join(depth_bins, by = "depth") |> 
+  #Adding area of grid cell
+  left_join(sb_areacello, by = c("lat", "lon")) |> 
+  rename(area = vals) |> 
+  #Calculate volume of grid cell
+  mutate(volume = depth_height*area) |> 
+  select(!standard_name:units) |> 
+  #Excludes grid cells that are not present in GFDL
+  drop_na(volume) |> 
   group_by(month) |>
-  transmute(wad_temp = weighted.mean(w_temp, area, na.rm = TRUE)) |>
-  distinct()
-
+  #Using volume as weights in mean calculation
+  summarise(w_temp_woa = weighted.mean(temperature, volume, na.rm = TRUE)) |>
+  #Transforming month column to factor
+  mutate(month = factor(month, levels = month.name, ordered = T))
 ```
 
 ### Loading GFDL obsclim Zarr file downloaded from the FishMIP Input Explorer app for the southern Benguela 
 ```{r}
-sb_temp <- paste0(inputpath,"gfdl-mom6-cobalt2_obsclim_thetao_15arcmin_southern-benguela_monthly_1961_2010.zarr")
+sb_temp <- file.path(
+  inputpath,
+  "gfdl-mom6-cobalt2_obsclim_thetao_15arcmin_southern-benguela_monthly_1961_2010.zarr")
 ```
 
 ### Exploring zarr file contents
@@ -143,19 +185,21 @@ names(temp_sb) <- c("time", "depth", "lat", "lon", "temperature")
 sb_gfdl <- temp_sb |> 
   filter(depth < 51) |> 
   drop_na(temperature) |>
-  mutate(date = as.Date("1961-01-01") %m+% months(round(time/30.417,0))) |>
+  mutate(date = as.Date("1961-01-01") %m+% months(round(time/30.417, 0))) |>
   group_by(lat, lon, date) |>
-  mutate(w_temp = weighted.mean(temperature, depth, na.rm= TRUE)) |>
-  full_join(sb_areacello, by = c("lat","lon")) |>
+  mutate(w_temp = weighted.mean(temperature, depth, na.rm = TRUE)) |>
+  full_join(sb_areacello, by = c("lat", "lon")) |>
   rename(area = vals) |>
   group_by(date) |>
-  transmute(wad_temp = weighted.mean(temperature, area, na.rm= TRUE)) |>
-  distinct()
+  summarise(wad_temp = weighted.mean(temperature, area, na.rm = TRUE)) |> 
+  #Adding month column to perform join with monthly climatological mean data
+  mutate(month = factor(month.name[month(date)], levels = month.name, 
+                        ordered = T))
 
 #plot the temperature time series ranging from January 1961 to December 2010
-  ggplot(sb_gfdl, aes(date, wad_temp)) +
+ggplot(sb_gfdl, aes(date, wad_temp)) +
   geom_line() +
-  labs(y = "Sea temperature 0- 50 m depth") +
+  labs(y = "Sea temperature 0-50 m depth") +
   theme_bw()
 ```
 
@@ -163,51 +207,83 @@ sb_gfdl <- temp_sb |>
 
 ```{r}
 #Process data first depth bin to check we have process data correctly
-
-df_b_bc <- (sb_gfdl$wad_temp - sb_g_clim$wad_temp) + sb_w_clim$wad_temp
-t_sb_bc <- bind_cols(sb_gfdl$date, df_b_bc)
-colnames(t_sb_bc) <- c("date","bc_temp")
+#Join monthly means with monthly climatologies from GFDL and WOA
+sb_temp_corr <- sb_gfdl |> 
+  left_join(sb_g_clim, by = "month") |> 
+  left_join(sb_w_clim, by = "month") |> 
+  #Apply correction
+  mutate(corrected_temp = wad_temp-w_temp_gfdl+w_temp_woa)
 
 #plot the temperature time series ranging from January 1961 to December 2010
-  ggplot(t_sb_bc, aes(date, bc_temp)) +
-  geom_line() +
-  geom_line(aes(sb_gfdl$date, sb_gfdl$wad_temp), color = 'blue') +
+ggplot(sb_temp_corr, aes(date)) +
+  geom_line(aes(y = corrected_temp), linewidth = 1) +
+  geom_line(aes(y = wad_temp), color = "red") +
   labs(y = "Sea temperature 0-50 m depth") +
   theme_bw()
   
  #calculate differences between datasets
- diff <- t_sb_bc$bc_temp - sb_gfdl$wad_temp
+ sb_temp_corr <- sb_temp_corr |> 
+   mutate(diff = corrected_temp-wad_temp)
  #print the monthly differences
- head(diff, 12)
+ head(sb_temp_corr, 12)
 ```
 
 ### Calculate climatologies for the model geometry 
 ```{r }
+#Calculating height of each depth bin
+depth_bins <- temp_sb |> 
+  filter(depth < 501) |> 
+  distinct(depth) |> 
+  #Calculating the difference between each depth bin to get the height of the
+  #grid cell
+  mutate(depth_height = depth-lag(depth, default = 0))
+
 # Calculating GFDL time series from 1961-2010 at the lat lon point
-sb_g_clims <-temp_sb |>
+sb_g_clims <- temp_sb |>
   filter(depth < 501) |> 
   drop_na(temperature) |>
-  mutate(layer = case_when(depth <51 ~ 1, depth > 51 & depth < 101 ~ 2, depth > 100 & depth < 301 ~ 3, depth >300 ~ 4)) |>
-  mutate(date = as.Date("1961-01-01") %m+% months(round(time/30.417,0))) |>
-  group_by(lon, lat, date, layer) |> #may need to convert time into months by dividing by 30.417
-  transmute(w_temp = weighted.mean(temperature, depth, na.rm= TRUE)) |>
-  distinct()   |>
+  mutate(layer = case_when(depth < 51 ~ 1, depth > 51 & depth < 101 ~ 2, 
+                           depth > 100 & depth < 301 ~ 3, depth > 300 ~ 4)) |>
+  mutate(date = as.Date("1961-01-01") %m+% months(round(time/30.417, 0))) |>
+  #Adding height of grid cell
+  left_join(depth_bins, by = "depth") |> 
+  #may need to convert time into months by dividing by 30.417
+  group_by(lon, lat, date, layer) |> 
+  summarise(w_temp = weighted.mean(temperature, depth_height, na.rm = TRUE)) |>
   full_join(sb_areacello, by = c("lat","lon")) |>
-  rename(area = vals) 
+  select(!standard_name:units) |> 
+  rename(area = vals)
+```
 
-#Creating an sf object from dataframe
-dsf <- st_as_sf(sb_g_clims, coords = c("lon", "lat"))
-st_crs(dsf) <- "+proj=longlat +datum=WGS84 +no_defs"
-class(dsf)
 
+# Create a mask from shapefile 
+**NOTE!!!!!!** - You will need to add the grouping information above, before calculating the weighted means. You should be weighting by volume as in the previous section.
+
+But below you can see how you can get the information about groups
+
+```{r}
 #Reading shapefile to perform data extraction for the model polygons
 cb <- st_read("~/Documents/abacus/Hydro/model_regions_v3_geo3.shp")
-plot(cb)
-box_id <- sort(as.numeric(paste(unique(cb$BOX_ID))))
-bxs <- as.numeric(as.vector(cb$BOX_ID))
 
-#Function needed that can work as extract on raster
-data_mean <- extract(dsf, cb, fun=weighted.mean(area), na.rm=T)
+#Create raster from data frame
+ras <-  sb_g_clims |>
+  ungroup() |>  
+  #A single date and layer is needed as a sample
+  filter(date == min(date) & layer == min(layer)) |> 
+  #Only these three columns are needed to create a raster
+  select(lon, lat, area) |> 
+  #Create raster
+  rast(type = "xyz", crs = "epsg:4326")
 
+#Create raster mask
+cb_mask <- rasterize(cb, ras, field = "BOX_ID", background = NA) |> 
+  #Transform to data frame
+  as.data.frame(xy = T) |> 
+  rename(lon = x, lat = y)
+#This contains a data frame identifying the group that each cell belongs to
+
+#Join data frames
+sb_g_clims |> 
+  full_join(cb_mask, by = c("lat", "lon"))
 ```
 
