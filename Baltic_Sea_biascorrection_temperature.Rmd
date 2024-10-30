@@ -17,8 +17,6 @@ library(nanoparquet)
 library(dplyr)
 library(Rarr)
 library(tidyr)
-library(terra)
-library(tibble)
 library(ggplot2)
 library(lubridate)
 ```
@@ -30,18 +28,24 @@ inputpath <- ("~/Documents/Fish-MIP/scripts/3a_paper_revised/temp_baltic-sea-miz
 
 ### Loading parquet files for the Baltic Sea downloaded from the FishMIP Input Explorer app 
 ```{r }
-baltic <- read_parquet(
-  paste0(inputpath,
-         "gfdl-mom6-cobalt2_obsclim_thetao_15arcmin_baltic-sea-mizer_mthly_clim_mean_1981_2010.parquet"))
-baltic_woa <- read_parquet(
-  paste0(inputpath,
-         "regridded_woa_baltic-sea-mizer_month_clim_mean_temp_1981-2010.parquet"))
-baltic_areacello <- read_parquet(
-  paste0(inputpath,
-         "gfdl-mom6-cobalt2_areacello_15arcmin_baltic-sea-mizer_fixed.parquet"))
-baltic_depth <- read_parquet(
-  paste0(inputpath,
-         "gfdl-mom6-cobalt2_obsclim_deptho_15arcmin_baltic-sea-mizer_fixed.parquet")) 
+baltic <- file.path(
+  inputpath,"gfdl-mom6-cobalt2_obsclim_thetao_15arcmin_baltic-sea-mizer_mthly_clim_mean_1981_2010.parquet") |> 
+  read_parquet()
+
+baltic_woa <- file.path(
+  inputpath,
+  "regridded_woa_baltic-sea-mizer_month_clim_mean_temp_1981-2010.parquet") |> 
+  read_parquet()
+
+baltic_areacello <- file.path(
+  inputpath,
+  "gfdl-mom6-cobalt2_areacello_15arcmin_baltic-sea-mizer_fixed.parquet") |> 
+  read_parquet()
+
+baltic_depth <- file.path(
+  inputpath,
+  "gfdl-mom6-cobalt2_obsclim_deptho_15arcmin_baltic-sea-mizer_fixed.parquet") |> 
+  read_parquet() 
 ```
 
 ### Exploring file contents
@@ -126,7 +130,7 @@ baltic_gfdl <- temp_b |>
   filter(depth == min(depth)) |> 
   drop_na(temperature) |>
   mutate(date = as.Date("1961-01-01") %m+% months(round(time/30.417, 0))) |>
-  full_join(baltic_areacello, by = c("lat","lon")) |>
+  full_join(baltic_areacello, by = c("lat", "lon")) |>
   rename(area = vals) |>
   group_by(date) |>
   summarise(w_temp = weighted.mean(temperature, area, na.rm = TRUE)) |> 
@@ -151,6 +155,23 @@ ggplot(baltic_gfdl, aes(date, w_temp)) +
 baltic_temp_corr <- baltic_gfdl |> 
   left_join(baltic_g_clim, by = "month") |> 
   left_join(baltic_w_clim, by = "month") |> 
+  #Checking if bias correction is needed
+  mutate(diff_woa_gfdl = w_temp_woa-w_temp_gfdl)
+
+#Plot differences in temperature between WOA and GFDL
+baltic_temp_corr |> 
+  distinct(month, diff_woa_gfdl) |> 
+  ggplot(aes(month, diff_woa_gfdl, group = 1))+
+  geom_line()+
+  geom_hline(aes(yintercept = 0), color = "red")+
+  labs(y = "Difference in mean monthly climatology (WOA - GFDL)")+
+  theme_bw()
+```
+
+Difference over 1$^{\circ}C$ detected for some months, so bias correction is recommended.  
+  
+```{r}
+baltic_temp_corr <- baltic_temp_corr |> 
   #Apply correction
   mutate(corrected_temp = w_temp-w_temp_gfdl+w_temp_woa)
 
