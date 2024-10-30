@@ -17,7 +17,7 @@ library(nanoparquet)
 library(dplyr)
 library(Rarr)
 library(tidyr)
-library(raster)
+library(terra)
 library(tibble)
 library(ggplot2)
 library(lubridate)
@@ -30,10 +30,18 @@ inputpath <- ("~/Documents/Fish-MIP/scripts/3a_paper_revised/temp_baltic-sea-miz
 
 ### Loading parquet files for the Baltic Sea downloaded from the FishMIP Input Explorer app 
 ```{r }
-baltic <- read_parquet(paste0(inputpath,"gfdl-mom6-cobalt2_obsclim_thetao_15arcmin_baltic-sea-mizer_mthly_clim_mean_1981_2010.parquet"))
-baltic_woa <- read_parquet(paste0(inputpath,"regridded_woa_baltic-sea-mizer_month_clim_mean_temp_1981-2010.parquet"))
-baltic_areacello <- read_parquet(paste0(inputpath,"gfdl-mom6-cobalt2_areacello_15arcmin_baltic-sea-mizer_fixed.parquet"))
-baltic_depth <- read_parquet(paste0(inputpath,"gfdl-mom6-cobalt2_obsclim_deptho_15arcmin_baltic-sea-mizer_fixed.parquet")) 
+baltic <- read_parquet(
+  paste0(inputpath,
+         "gfdl-mom6-cobalt2_obsclim_thetao_15arcmin_baltic-sea-mizer_mthly_clim_mean_1981_2010.parquet"))
+baltic_woa <- read_parquet(
+  paste0(inputpath,
+         "regridded_woa_baltic-sea-mizer_month_clim_mean_temp_1981-2010.parquet"))
+baltic_areacello <- read_parquet(
+  paste0(inputpath,
+         "gfdl-mom6-cobalt2_areacello_15arcmin_baltic-sea-mizer_fixed.parquet"))
+baltic_depth <- read_parquet(
+  paste0(inputpath,
+         "gfdl-mom6-cobalt2_obsclim_deptho_15arcmin_baltic-sea-mizer_fixed.parquet")) 
 ```
 
 ### Exploring file contents
@@ -47,28 +55,31 @@ parquet_column_types(baltic_depth)
 ### Processing temperature data
 ```{r }
 # Calculating GFDL climatologies from 1981-2010
-baltic_g_clim <-baltic %>%
-  filter(depth == min(depth)) %>%
-  full_join(baltic_areacello, by = c("lat","lon")) %>%
-  rename(temp = vals.x, area = vals.y) %>%
-  group_by(month) %>%
-  transmute(w_temp = weighted.mean(temp, area, na.rm = TRUE)) %>%
-  distinct()
+baltic_g_clim <- baltic |>
+  filter(depth == min(depth)) |>
+  full_join(baltic_areacello, by = c("lat","lon")) |>
+  rename(temp = vals.x, area = vals.y) |>
+  group_by(month) |>
+  summarise(w_temp_gfdl = weighted.mean(temp, area, na.rm = TRUE)) |>
+  #Transforming month into an ordered factor for plotting
+  mutate(month = factor(month, labels = month.name, ordered = T))
 
 # Calculating WOA climatologies from 1981-2010
-baltic_w_clim <-baltic_woa %>%
-  filter(depth == min(depth)) %>%
-  full_join(baltic_areacello, by = c("lat","lon")) %>%
-  rename(temp = vals.x, area = vals.y) %>%
-  drop_na(temp, area) %>%
-  group_by(month) %>%
-  transmute(w_temp = weighted.mean(temp, area, na.rm= TRUE)) %>%
-  distinct()
+baltic_w_clim <- baltic_woa |>
+  filter(depth == min(depth)) |>
+  full_join(baltic_areacello, by = c("lat","lon")) |>
+  rename(temp = vals.x, area = vals.y) |>
+  drop_na(temp, area) |>
+  group_by(month) |>
+  summarise(w_temp_woa = weighted.mean(temp, area, na.rm = TRUE))|>
+  #Transforming month into an ordered factor for plotting
+  mutate(month = factor(month, labels = month.name, ordered = T))
 ```
 
 ### Loading GFDL obsclim Zarr file downloaded from the FishMIP Input Explorer app for the Baltic Sea
 ```{r}
-baltic_temp <- paste0(inputpath,"gfdl-mom6-cobalt2_obsclim_thetao_15arcmin_baltic-sea-mizer_monthly_1961_2010.zarr")
+baltic_temp <- paste0(inputpath,
+                      "gfdl-mom6-cobalt2_obsclim_thetao_15arcmin_baltic-sea-mizer_monthly_1961_2010.zarr")
 ```
 
 ### Exploring zarr file contents
@@ -114,15 +125,17 @@ names(temp_b) <- c("time", "depth", "lat", "lon", "temperature")
 baltic_gfdl <- temp_b |> 
   filter(depth == min(depth)) |> 
   drop_na(temperature) |>
-  mutate(date = as.Date("1961-01-01") %m+% months(round(time/30.417,0))) |>
+  mutate(date = as.Date("1961-01-01") %m+% months(round(time/30.417, 0))) |>
   full_join(baltic_areacello, by = c("lat","lon")) |>
   rename(area = vals) |>
   group_by(date) |>
-  transmute(w_temp = weighted.mean(temperature, area, na.rm= TRUE)) |>
-  distinct()
+  summarise(w_temp = weighted.mean(temperature, area, na.rm = TRUE)) |> 
+  #Adding month column to perform join with monthly climatological mean data
+  mutate(month = factor(month.name[month(date)], levels = month.name, 
+                        ordered = T))
 
 #plot the temperature time series ranging from January 1961 to December 2010
-  ggplot(baltic_gfdl, aes(date, w_temp)) +
+ggplot(baltic_gfdl, aes(date, w_temp)) +
   geom_line() +
   labs(y = "Sea temperature 2.5 m depth") +
   theme_bw()
@@ -131,21 +144,29 @@ baltic_gfdl <- temp_b |>
 ### Calculate bias corrected temperature time series 
 
 ```{r}
-#Follow sub-steps described in the supplementary material in Ortega-Cisneros et al. 2024
-df_b_bc <- (baltic_gfdl$w_temp - baltic_g_clim$w_temp) + baltic_w_clim$w_temp
-t_b_bc <- bind_cols(baltic_gfdl$date, df_b_bc)
-colnames(t_b_bc) <- c("date","bc_temp")
+#Follow sub-steps described in the supplementary material in Ortega-Cisneros 
+#et al. 2024
 
-#plot the bias corrected temperature time series ranging from January 1961 to December 2010 vs GFDL time series (non-corrected)
-  ggplot(t_b_bc, aes(date, bc_temp)) +
-  geom_line() +
-  geom_line(aes(baltic_gfdl$date, baltic_gfdl$w_temp), color = 'blue') +
+#Join monthly means with monthly climatologies from GFDL and WOA
+baltic_temp_corr <- baltic_gfdl |> 
+  left_join(baltic_g_clim, by = "month") |> 
+  left_join(baltic_w_clim, by = "month") |> 
+  #Apply correction
+  mutate(corrected_temp = w_temp-w_temp_gfdl+w_temp_woa)
+
+
+#plot the bias corrected temperature time series ranging from January 1961 to 
+#December 2010 vs GFDL time series (non-corrected)
+ggplot(baltic_temp_corr, aes(x = date)) +
+  geom_line(aes(y = corrected_temp), linewidth = 1) +
+  geom_line(aes(y = w_temp), color = "red") +
   labs(y = "Area-weighted Sea temperature 2.5 m depth") +
   theme_bw()
   
  #calculate differences between datasets
- diff <- t_b_bc$bc_temp - baltic_gfdl$w_temp
+ baltic_temp_corr <- baltic_temp_corr |> 
+   mutate(diff = corrected_temp-w_temp)
  #print the monthly differences
- head(diff, 12)
+ head(baltic_temp_corr, 12)
 ```
 
