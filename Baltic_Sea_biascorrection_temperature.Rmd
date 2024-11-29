@@ -1,6 +1,6 @@
 ---
 title: "Creating bias-corrected time series of sea temperature"
-author: "Kelly Ortega based on Denisse Fierro- Arcos script"
+author: "Kelly Ortega, Denisse Fierro- Arcos"
 date: "2024-10-23"
 output: html_document
 ---
