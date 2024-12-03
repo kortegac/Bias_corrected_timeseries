@@ -1,0 +1,380 @@
+---
+title: "Creating bias-corrected time series of sea temperature"
+author: "Kelly Ortega-Cisneros, Denisse Fierro-Arcos"
+date: "2024-10-24"
+output: html_document
+---
+In this notebook, we describe the process to create time series of bias corrected temperature following the guidelines from Ortega-Cisneros et al., (2024).
+
+We will use data data downloaded from our FishMIP Input Explorer app, specifically, the data from the 'Model outputs against observations' tab for three case study regions. The data is downloaded as a folder containing four files. You will need to unzip the folder before running this script to access the .parquet files.
+
+#Loading relevant libraries
+
+```{r setup, include=FALSE}
+.libPaths("/home/user/R/x86_64-pc-linux-gnu-library/4.3")
+library(nanoparquet)
+library(dplyr)
+library(Rarr)
+library(tidyr)
+library(terra)
+library(sf)
+library(ggplot2)
+library(lubridate)
+library(cowplot)
+```
+
+### Defining the location to the input files
+```{r}
+inputpath <- "~/Documents/Fish-MIP/scripts/3a_paper_revised/temp_sbenguela_atlantis/"
+```
+
+### Loading parquet files for the southern Benguela downloaded from the FishMIP Shiny app
+```{r }
+sb_g <- file.path(
+  inputpath,
+  "gfdl-mom6-cobalt2_obsclim_thetao_15arcmin_southern-benguela_mthly_clim_mean_1981_2010.parquet") |> 
+  read_parquet()
+sb_woa <- file.path(
+  inputpath,
+  "regridded_woa_southern-benguela_month_clim_mean_temp_1981-2010.parquet") |> 
+  read_parquet()
+sb_areacello <- file.path(
+  inputpath,
+  "gfdl-mom6-cobalt2_areacello_15arcmin_southern-benguela_fixed.parquet") |> 
+  read_parquet()
+sb_depth <- file.path(
+  inputpath,
+  "gfdl-mom6-cobalt2_obsclim_deptho_15arcmin_southern-benguela_fixed.parquet") |> 
+  read_parquet() 
+```
+
+### Exploring file contents
+```{r }
+parquet_column_types(sb_g)
+parquet_column_types(sb_woa)
+parquet_column_types(sb_areacello)
+parquet_column_types(sb_depth)
+```
+
+### Processing temperature data to calculate climatologies for the whole model area
+```{r }
+#Plotting temperature data for the upper most layer from GFDL
+sb_g |>
+  filter(depth == min(depth)) |>
+  ggplot(aes(lon, lat, fill = vals)) +
+  geom_tile()
+
+#Calculating height of depth bins - This step is needed because the depth value
+#includes the depth of the water column up to that grid cell. If weighting by
+#depth, we should only include the depth for the grid cell (i.e., height of the
+#grid cell).
+depth_bins <- sb_g |> 
+  filter(depth < 501) |> 
+  distinct(depth) |> 
+  #Calculating the difference between each depth bin to get the height of the
+  #grid cell
+  mutate(depth_height = depth-lag(depth, default = 0))
+
+# Calculating GFDL climatologies from 1981-2010
+sb_g_clims <- sb_g |>
+  #Keeping relevant columns only
+  dplyr::select(lat:vals) |> 
+  rename(temperature = vals) |>
+  filter(depth < 501) |>
+  drop_na(temperature) |>
+  mutate(layer = case_when(depth < 51 ~ 1, depth > 51 & depth < 101 ~ 2, 
+                           depth > 100 & depth < 301 ~ 3, depth > 300 ~ 4)) |>
+  #Adding height of grid cell
+  left_join(depth_bins, by = "depth") |> 
+  group_by(lon, lat, month, layer) |> 
+  summarise(w_temp = weighted.mean(temperature, depth_height, na.rm = TRUE)) |>
+  #Adding area of grid cell
+  left_join(sb_areacello, by = c("lat", "lon")) |> 
+  dplyr::select(!standard_name:units) |> 
+  rename(area = vals)
+  
+#Reading shapefile to perform data extraction for the model polygons
+cb <- st_read("~/Documents/abacus/Hydro/model_regions_v3_geo3.shp")
+
+#Create raster from data frame
+ras <-  sb_g_clims |>
+  ungroup() |>  
+  #A single date and layer is needed as a sample
+  filter(layer == min(layer) & month == min(month)) |> 
+  #Only these three columns are needed to create a raster
+  dplyr::select(lon, lat, area) |> 
+  #Create raster
+  rast(type = "xyz", crs = "epsg:4326")
+
+#Create raster mask
+cb_mask <- rasterize(cb, ras, field = "BOX_ID", background = NA) |> 
+  #Transform to data frame
+  as.data.frame(xy = T) |> 
+  rename(lon = x, lat = y)
+#This contains a data frame identifying the group that each cell belongs to
+
+#Join data frames
+sb_g_clims <- sb_g_clims |>
+  full_join(cb_mask, by = c("lat", "lon"))
+
+#Finalise the data extraction for the model polygons
+sb_g_clim_box <- sb_g_clims |>
+  group_by(layer, month, BOX_ID)|>
+  #Using volume as weights in mean calculation
+  drop_na(w_temp) |>
+  summarise(w_temp_gfdl = weighted.mean(w_temp, area, na.rm = TRUE)) |> 
+  #Transforming month column to factor
+  mutate(month = factor(month, levels = month.name)) |>
+  arrange(as.numeric(BOX_ID),month)
+
+#Plotting temperature data for the upper most layer from WOA climatology
+sb_woa |>
+  filter(depth == min(depth)) |>
+  ggplot(aes(lon, lat, fill = vals)) +
+  geom_tile()
+
+# Calculating WOA climatologies from 1981-2010 for the 0-50 m depth layer or realm of this model
+sb_w_clim_box <- sb_woa |>
+  #Keeping relevant columns only
+  dplyr::select(lat:vals) |> 
+  rename(temperature = vals) |>
+  filter(depth < 501) |>
+  drop_na(temperature) |>
+  mutate(layer = case_when(depth < 51 ~ 1, depth > 51 & depth < 101 ~ 2, 
+                           depth > 100 & depth < 301 ~ 3, depth > 300 ~ 4)) |>
+  #Adding height of grid cell
+  left_join(depth_bins, by = "depth") |> 
+  group_by(lon, lat, month, layer) |> 
+  #Calculating depth-weighted average
+  summarise(w_temp = weighted.mean(temperature, depth_height, na.rm = TRUE)) |>
+  #Adding area of grid cell
+  left_join(sb_areacello, by = c("lat", "lon")) |>
+  # Joining cb_mask (data frame identifying the box that each cell belongs to) and the WOA dataset
+  full_join(cb_mask, by = c("lat", "lon")) |>
+  dplyr::select(!standard_name:units) |> 
+  rename(area = vals) |> 
+  #Excludes grid cells that are not present in GFDL
+  drop_na(area, w_temp) |> 
+  group_by(layer, month, BOX_ID) |>
+  #Using area as weights in mean calculation
+  summarise(w_temp_woa = weighted.mean(w_temp, area, na.rm = TRUE)) |>
+  #Transforming month column to factor
+  mutate(month = factor(month, levels = month.name)) |>
+  arrange(BOX_ID, month)
+```
+
+### Loading GFDL obsclim Zarr file downloaded from the FishMIP Input Explorer app for the southern Benguela 
+```{r}
+sb_temp <- file.path(
+  inputpath,
+  "gfdl-mom6-cobalt2_obsclim_thetao_15arcmin_southern-benguela_monthly_1961_2010.zarr")
+```
+
+### Exploring zarr file contents
+```{r }
+zarr_overview(sb_temp)
+
+  # Path: thetao
+  # Shape: 600 x 35 x 36 x 55
+  # Chunk Shape: 600 x 5 x 36 x 55
+  # No. of Chunks: 7 (1 x 7 x 1 x 1)
+  # Data Type: float32
+  # Endianness: little
+  # Compressor: blosc
+```
+
+### Loading data
+
+We will add the variable name to the end of the `zarr` path we defined above to load all data.
+```{r }
+temp_data <- read_zarr_array(file.path(sb_temp, "thetao"))
+depth <- read_zarr_array(file.path(sb_temp, "depth_bin_m"))
+lat <- read_zarr_array(file.path(sb_temp, "lat"))
+lon <- read_zarr_array(file.path(sb_temp, "lon"))
+time <- read_zarr_array(file.path(sb_temp, "time"))
+```
+
+### Checking dimensions of temperature data
+
+```{r }
+dim(temp_data)
+#File dimensions are 600 (time) 35 (depth) 36 (lat)  55 (lon)
+
+#plot slice 1 for time and depth
+image(temp_data[1,1,,])
+```
+
+### Creating a data frame from all components
+
+Important to check dimensions of dataset. Note that dimensions need to match the order of dimensions in the temperature data
+```{r }
+temp_sb <- cbind(expand.grid(time, depth, lat, lon), val = as.vector(temp_data))
+
+#Rename the columns to reflect their contents
+names(temp_sb) <- c("time", "depth", "lat", "lon", "temperature")
+```
+
+### Calculate monthly temperature time series from GFDL obsclim
+
+```{r}
+#Process data from GFDL obsclim 
+sb_gfdl_box <- temp_sb |> 
+  filter(depth < 501) |> 
+  drop_na(temperature) |>
+  mutate(date = as.Date("1961-01-01") %m+% months(round(time/30.417, 0))) |>
+  #grouping depth bins into the four depth layers of the southern Benguela Atlantis
+  mutate(layer = case_when(depth < 51 ~ 1, depth > 51 & depth < 101 ~ 2, 
+                           depth > 100 & depth < 301 ~ 3, depth > 300 ~ 4)) |>
+  left_join(depth_bins, by = "depth") |> 
+  group_by(lon, lat, date, layer) |> 
+  #Calculating depth-weighted average
+  summarise(w_temp = weighted.mean(temperature, depth_height, na.rm = TRUE)) |>
+  left_join(sb_areacello, by = c("lat", "lon")) |>
+  # Joining cb_mask (data frame identifying the box that each cell belongs to) and the GFDL time series
+  full_join(cb_mask, by = c("lat", "lon")) |>
+  dplyr::select(!standard_name:units) |> 
+  rename(area = vals) |> 
+ #Excludes grid cells that are not present in GFDL
+  drop_na(area, w_temp) |> 
+  group_by(layer, date, BOX_ID) |>
+  #Using area as weights in mean calculation
+  summarise(w_temp_ts = weighted.mean(w_temp, area, na.rm = TRUE)) |>
+  arrange(BOX_ID, date)
+ 
+ 
+#plot the temperature time series ranging from January 1961 to December 2010
+sb_gfdl_box |>
+  filter(BOX_ID == 0 & layer == 1)|>
+  ggplot(aes(date, w_temp_ts)) +
+  geom_line() +
+  labs(y = "Sea temperature 0-50 m depth for box 1 and layer 1") +
+  theme_bw()
+```
+
+### Calculate bias corrected temperature time series 
+
+```{r}
+#Join monthly means with monthly climatologies from GFDL and WOA
+sb_temp_corr_box <- sb_gfdl_box |> 
+  mutate(month = factor(month.name[month(date)])) |> 
+  left_join(sb_g_clim_box, by = c("layer", "month", "BOX_ID")) |> 
+  left_join(sb_w_clim_box, by = c("layer", "month", "BOX_ID")) |> 
+  #Apply correction
+  mutate(corrected_temp = w_temp_ts-w_temp_gfdl+w_temp_woa)
+
+#plot the temperature time series ranging from January 1961 to December 2010
+sb_temp_corr_box |> 
+filter(BOX_ID== 2 & layer ==1) |>
+ggplot(aes(date)) +
+  geom_line(aes(y = corrected_temp), linewidth = 1) +
+  geom_line(aes(y = w_temp_ts), color = "red") +
+  labs(y = "Sea temperature 0-50 m depth in Box 2") +
+  theme_bw()
+  
+ #calculate differences between datasets
+ sb_temp_corr_box <- sb_temp_corr_box |> 
+ mutate(diff = corrected_temp-w_temp_ts)
+ #print the monthly differences
+ head(sb_temp_corr_box, 12)
+ 
+ # Saving datasets
+ #outputpath <- "~/Documents/Fish-MIP/ISIMIP3a/Data/output/"  
+ #write.csv(sb_temp_corr_box, file.path(outputpath,"sb_temp_corr_box.csv"), row.names = FALSE)
+
+```
+
+### Preparing figures for paper
+
+```{r}
+# Plotting the shapefile showing the depth layers and boxes
+fig4a <- ggplot(data = cb) +
+  geom_sf(aes(fill= as.factor(botz))) +
+  labs(fill = "Depth layers", x="", y="") +
+  annotate(geom="text", x=23.0, y=-34.2, label= "4", color="black") +
+  annotate(geom="text", x=16.52, y=-32.1, label= "11", color="black") +
+  guides(fill = guide_legend(reverse=TRUE))+ 
+  scale_fill_brewer(palette = "Blues", direction =-1) +
+  theme_bw(base_size = 10)+
+  theme(panel.grid.minor = element_blank(),panel.grid.major = element_blank(),legend.position = "bottom")
+
+#plot the temperature time series ranging from January 1961 to December 2010 for box 4
+box4_l1 <- sb_temp_corr_box |> 
+filter(BOX_ID== 4 & layer ==1) |>
+  ggplot(aes(date)) +
+  geom_line(aes(y = corrected_temp), linewidth = 0.8) +
+  geom_line(aes(y = w_temp_ts), color = "dodgerblue", linewidth =0.8) +
+  ggtitle("0-50m depth")+
+  labs(x = '', y = 'Sea temperature')  +
+  #scale_x_continuous(limits = c(1950, 2010), breaks=seq(1960, 2010, 20), expand = c(0,2)) + 
+  scale_y_continuous(limits = c(14,23), breaks=seq(14,23,2), expand = c(0,0.0)) +
+  theme_bw(base_size = 14)+
+  theme(plot.title = element_text(hjust = 0.5, face = "bold"),legend.position = "none", panel.grid.minor = element_blank(),panel.grid.major = element_blank()) 
+
+box4_l2 <- sb_temp_corr_box |> 
+  filter(BOX_ID== 4 & layer ==2) |>
+  ggplot(aes(date)) +
+  geom_line(aes(y = corrected_temp), linewidth = 0.8) +
+  geom_line(aes(y = w_temp_ts), color = "dodgerblue", linewidth =0.8) +
+  ggtitle("50-100m depth")+
+  labs(x = '', y = '')  +
+  scale_y_continuous(limits = c(10,19), breaks=seq(10,19,2), expand = c(0,0.0)) +
+  theme_bw(base_size = 14)+
+  theme(plot.title = element_text(hjust = 0.5, face = "bold"),legend.position = "none", panel.grid.minor = element_blank(),panel.grid.major = element_blank()) 
+
+fig4b<- plot_grid(box4_l1, box4_l2, nrow =1, align = "h")
+
+#plot the temperature time series ranging from January 1961 to December 2010 for box 4
+box11_l1 <- sb_temp_corr_box |> 
+filter(BOX_ID== 11 & layer ==1) |>
+  ggplot(aes(date)) +
+  geom_line(aes(y = corrected_temp), linewidth = 0.8) +
+  geom_line(aes(y = w_temp_ts), color = "dodgerblue", linewidth =0.8) +
+  ggtitle("0-50m depth")+
+  labs(x = '', y = 'Sea temperature')  +
+  scale_y_continuous(limits = c(14,21), breaks=seq(14,21,2), expand = c(0,0.0)) +
+  theme_bw(base_size = 14)+
+  theme(plot.title = element_text(hjust = 0.5, face = "bold"),legend.position = "none", panel.grid.minor = element_blank(),panel.grid.major = element_blank()) 
+
+box11_l2 <- sb_temp_corr_box |> 
+  filter(BOX_ID== 11 & layer ==2) |>
+  ggplot(aes(date)) +
+  geom_line(aes(y = corrected_temp), linewidth = 0.8) +
+  geom_line(aes(y = w_temp_ts), color = "dodgerblue", linewidth =0.8) +
+  ggtitle("50-100m depth")+
+  labs(x = '', y = '')  +
+  scale_y_continuous(limits = c(12,17), breaks=seq(12,17,2), expand = c(0,0.0)) +
+  theme_bw(base_size = 14)+
+  theme(plot.title = element_text(hjust = 0.5, face = "bold"),legend.position = "none", panel.grid.minor = element_blank(),panel.grid.major = element_blank()) 
+
+box11_l3 <- sb_temp_corr_box |> 
+  filter(BOX_ID== 11 & layer ==3) |>
+  ggplot(aes(date)) +
+  geom_line(aes(y = corrected_temp), linewidth = 0.8) +
+  geom_line(aes(y = w_temp_ts), color = "dodgerblue", linewidth =0.8) +
+  ggtitle("100-300m depth")+
+  labs(x = '', y = '')  +
+  scale_y_continuous(limits = c(9,13), breaks=seq(9,13,1), expand = c(0,0.0)) +
+  theme_bw(base_size = 14)+
+  theme(plot.title = element_text(hjust = 0.5, face = "bold"),legend.position = "none", panel.grid.minor = element_blank(),panel.grid.major = element_blank()) 
+
+box11_l4 <- sb_temp_corr_box |> 
+  filter(BOX_ID== 11 & layer ==4) |>
+  ggplot(aes(date)) +
+  geom_line(aes(y = corrected_temp), linewidth = 0.8) +
+  geom_line(aes(y = w_temp_ts), color = "dodgerblue", linewidth =0.8) +
+  ggtitle("300-500m depth")+
+  labs(x = '', y = '')  +
+  #scale_x_continuous(limits = c(1960, 2010), breaks=seq(1960, 2010, 20), expand = c(0,2)) + 
+  scale_y_continuous(limits = c(7,12), breaks=seq(7,12,1), expand = c(0,0.0)) +
+  theme_bw(base_size = 14)+
+  theme(plot.title = element_text(hjust = 0.5, face = "bold"),legend.position = "none", panel.grid.minor = element_blank(),panel.grid.major = element_blank()) 
+
+fig4c <- plot_grid(box11_l1, box11_l2, box11_l3, box11_l4, nrow =1, align = "h", labels = "C")
+
+fig4_upper <- plot_grid(fig4a, fig4b, nrow =1, labels = c("A", "B"), axis ="l")
+pdf("~/Documents/Fish-MIP/ISIMIP3a/Data/output/fig4_rev.pdf",width=12,height=8.25)
+plot_grid(fig4_upper, fig4c, ncol=1, align = "v", axis = 'l')
+dev.off()
+```
+```
+
