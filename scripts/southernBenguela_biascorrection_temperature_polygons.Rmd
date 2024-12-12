@@ -2,16 +2,15 @@
 title: "Creating bias-corrected time series of sea temperature"
 author: "Kelly Ortega-Cisneros, Denisse Fierro-Arcos"
 date: "2024-10-24"
-output: html_document
+output: pdf_document
 ---
 In this notebook, we describe the process to create time series of bias corrected temperature following the guidelines from Ortega-Cisneros et al., (2024).
 
-We will use data data downloaded from our FishMIP Input Explorer app, specifically, the data from the 'Model outputs against observations' tab for three case study regions. The data is downloaded as a folder containing four files. You will need to unzip the folder before running this script to access the .parquet files.
+We will use data data downloaded from our FishMIP Input Explorer app, specifically, the data from the 'Model outputs against observations' tab for three case study regions. The data is downloaded as a folder containing four files. You will need to unzip the folder before running this script to access the `.parquet` files.
 
-#Loading relevant libraries
+# Loading relevant libraries
 
 ```{r setup, include=FALSE}
-.libPaths("/home/user/R/x86_64-pc-linux-gnu-library/4.3")
 library(nanoparquet)
 library(dplyr)
 library(Rarr)
@@ -22,53 +21,68 @@ library(ggplot2)
 library(lubridate)
 library(cowplot)
 ```
-
-### Defining the location to the input files
+  
+# Loading relevant files
+We use the southern Benguela model as an example, but you can replace it with data for any regional model available via the FishMIP Shiny app. You need to ensure that files are downloaded and stored in the `data` folder of this repository prior to running this script.  
+  
 ```{r}
-inputpath <- "~/Documents/Fish-MIP/scripts/3a_paper_revised/temp_sbenguela_atlantis/"
-```
-
-### Loading parquet files for the southern Benguela downloaded from the FishMIP Shiny app
-```{r }
-sb_g <- file.path(
-  inputpath,
+# Temperature data from GFDL
+sb_gfdl <- file.path(
+  "../data",
   "gfdl-mom6-cobalt2_obsclim_thetao_15arcmin_southern-benguela_mthly_clim_mean_1981_2010.parquet") |> 
   read_parquet()
+
+# Temperature data from WOA
 sb_woa <- file.path(
-  inputpath,
+  "../data",
   "regridded_woa_southern-benguela_month_clim_mean_temp_1981-2010.parquet") |> 
   read_parquet()
+
+# Area of grid cells
 sb_areacello <- file.path(
-  inputpath,
+  "../data",
   "gfdl-mom6-cobalt2_areacello_15arcmin_southern-benguela_fixed.parquet") |> 
   read_parquet()
+
+# Depth of grid cells
 sb_depth <- file.path(
-  inputpath,
+  "../data",
   "gfdl-mom6-cobalt2_obsclim_deptho_15arcmin_southern-benguela_fixed.parquet") |> 
   read_parquet() 
+
+# Regional model shapefile
+benguela <- st_read("../data/model_regions_v3_geo3.shp")
+```
+  
+## Exploring file contents
+You can use the `nanoparquet` package to explore the contents of the parquet files as shown below. This is useful to understand the structure of the data and the column types. Alternatively, you can use the `str()` function from base R or `glimpse` from `dplyr` to get a summary of the data.  
+  
+```{r}
+parquet_column_types(sb_gfdl)
 ```
 
-### Exploring file contents
+# Visualising temperature data
+Plotting temperature data for the upper most layer from GFDL monthly climatology file.
+  
 ```{r }
-parquet_column_types(sb_g)
-parquet_column_types(sb_woa)
-parquet_column_types(sb_areacello)
-parquet_column_types(sb_depth)
-```
-
-### Processing temperature data to calculate climatologies for the whole model area
-```{r }
-#Plotting temperature data for the upper most layer from GFDL
-sb_g |>
+sb_gfdl |>
   filter(depth == min(depth)) |>
+  #Converting months to factor and ordering them prior to plotting
+  mutate(month = factor(month, levels = month.name, ordered = T)) |>
   ggplot(aes(lon, lat, fill = vals)) +
-  geom_tile()
+  geom_tile()+
+  scale_fill_viridis_c(option = "inferno")+
+  facet_wrap(~month)
 
-#Calculating height of depth bins - This step is needed because the depth value
-#includes the depth of the water column up to that grid cell. If weighting by
-#depth, we should only include the depth for the grid cell (i.e., height of the
-#grid cell).
-depth_bins <- sb_g |> 
+```
+  
+The plot shows the monthly climatology (1981-2010) of sea surface temperature for the southern Benguela region from the GFDL model. Warmer colours indicate higher temperatures. The warmest months are January to March.  
+  
+# Processing temperature data
+Currently, the depth file includes the depth from the surface to the depth bin, so we will calculate the height of the depth bins. We do this because we need to calculate the volume of the grid cell to use as a weight when calculating the weighted mean for temperature.  
+
+```{r}
+depth_bins <- sb_gfdl |> 
   filter(depth < 501) |> 
   distinct(depth) |> 
   #Calculating the difference between each depth bin to get the height of the
@@ -76,7 +90,7 @@ depth_bins <- sb_g |>
   mutate(depth_height = depth-lag(depth, default = 0))
 
 # Calculating GFDL climatologies from 1981-2010
-sb_g_clims <- sb_g |>
+sb_gfdl_clims <- sb_gfdl |>
   #Keeping relevant columns only
   dplyr::select(lat:vals) |> 
   rename(temperature = vals) |>
@@ -93,11 +107,8 @@ sb_g_clims <- sb_g |>
   dplyr::select(!standard_name:units) |> 
   rename(area = vals)
   
-#Reading shapefile to perform data extraction for the model polygons
-cb <- st_read("~/Documents/abacus/Hydro/model_regions_v3_geo3.shp")
-
 #Create raster from data frame
-ras <-  sb_g_clims |>
+ras <-  sb_gfdl_clims |>
   ungroup() |>  
   #A single date and layer is needed as a sample
   filter(layer == min(layer) & month == min(month)) |> 
@@ -107,18 +118,18 @@ ras <-  sb_g_clims |>
   rast(type = "xyz", crs = "epsg:4326")
 
 #Create raster mask
-cb_mask <- rasterize(cb, ras, field = "BOX_ID", background = NA) |> 
+cb_mask <- rasterize(benguela, ras, field = "BOX_ID", background = NA) |> 
   #Transform to data frame
   as.data.frame(xy = T) |> 
   rename(lon = x, lat = y)
 #This contains a data frame identifying the group that each cell belongs to
 
 #Join data frames
-sb_g_clims <- sb_g_clims |>
+sb_gfdl_clims <- sb_gfdl_clims |>
   full_join(cb_mask, by = c("lat", "lon"))
 
 #Finalise the data extraction for the model polygons
-sb_g_clim_box <- sb_g_clims |>
+sb_gfdl_clim_box <- sb_gfdl_clims |>
   group_by(layer, month, BOX_ID)|>
   #Using volume as weights in mean calculation
   drop_na(w_temp) |>
@@ -257,7 +268,7 @@ sb_gfdl_box |>
 #Join monthly means with monthly climatologies from GFDL and WOA
 sb_temp_corr_box <- sb_gfdl_box |> 
   mutate(month = factor(month.name[month(date)])) |> 
-  left_join(sb_g_clim_box, by = c("layer", "month", "BOX_ID")) |> 
+  left_join(sb_gfdl_clim_box, by = c("layer", "month", "BOX_ID")) |> 
   left_join(sb_w_clim_box, by = c("layer", "month", "BOX_ID")) |> 
   #Apply correction
   mutate(corrected_temp = w_temp_ts-w_temp_gfdl+w_temp_woa)
@@ -287,7 +298,7 @@ ggplot(aes(date)) +
 
 ```{r}
 # Plotting the shapefile showing the depth layers and boxes
-fig4a <- ggplot(data = cb) +
+fig4a <- ggplot(data = benguela) +
   geom_sf(aes(fill= as.factor(botz))) +
   labs(fill = "Depth layers", x="", y="") +
   annotate(geom="text", x=23.0, y=-34.2, label= "4", color="black") +
