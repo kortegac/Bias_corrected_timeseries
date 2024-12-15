@@ -100,12 +100,13 @@ sb_gfdl_clims <- sb_gfdl |>
                            depth > 100 & depth < 301 ~ 3, depth > 300 ~ 4)) |>
   #Adding height of grid cell
   left_join(depth_bins, by = "depth") |> 
-  group_by(lon, lat, month, layer) |> 
-  summarise(w_temp = weighted.mean(temperature, depth_height, na.rm = TRUE)) |>
   #Adding area of grid cell
   left_join(sb_areacello, by = c("lat", "lon")) |> 
-  dplyr::select(!standard_name:units) |> 
-  rename(area = vals)
+  rename(area = vals) |> 
+  #Calculate volume of grid cell
+  mutate(volume = depth_height*area) |> 
+  #Keeping relevant columns only
+  dplyr::select(!standard_name:units)
   
 #Create raster from data frame
 ras <-  sb_gfdl_clims |>
@@ -132,8 +133,8 @@ sb_gfdl_clims <- sb_gfdl_clims |>
 sb_gfdl_clim_box <- sb_gfdl_clims |>
   group_by(layer, month, BOX_ID)|>
   #Using volume as weights in mean calculation
-  drop_na(w_temp) |>
-  summarise(w_temp_gfdl = weighted.mean(w_temp, area, na.rm = TRUE)) |> 
+  drop_na(temperature) |>
+  summarise(w_temp_gfdl = weighted.mean(temperature, volume, na.rm = TRUE)) |> 
   #Transforming month column to factor
   mutate(month = factor(month, levels = month.name)) |>
   arrange(as.numeric(BOX_ID),month)
@@ -156,19 +157,19 @@ sb_w_clim_box <- sb_woa |>
   #Adding height of grid cell
   left_join(depth_bins, by = "depth") |> 
   group_by(lon, lat, month, layer) |> 
-  #Calculating depth-weighted average
-  summarise(w_temp = weighted.mean(temperature, depth_height, na.rm = TRUE)) |>
   #Adding area of grid cell
   left_join(sb_areacello, by = c("lat", "lon")) |>
+  rename(area = vals) |> 
   # Joining cb_mask (data frame identifying the box that each cell belongs to) and the WOA dataset
   full_join(cb_mask, by = c("lat", "lon")) |>
+  #Calculate volume of grid cell
+  mutate(volume = depth_height*area) |> 
   dplyr::select(!standard_name:units) |> 
-  rename(area = vals) |> 
   #Excludes grid cells that are not present in GFDL
-  drop_na(area, w_temp) |> 
+  drop_na(volume, temperature) |> 
   group_by(layer, month, BOX_ID) |>
   #Using area as weights in mean calculation
-  summarise(w_temp_woa = weighted.mean(w_temp, area, na.rm = TRUE)) |>
+  summarise(w_temp_woa = weighted.mean(temperature, volume, na.rm = TRUE)) |>
   #Transforming month column to factor
   mutate(month = factor(month, levels = month.name)) |>
   arrange(BOX_ID, month)
@@ -177,10 +178,9 @@ sb_w_clim_box <- sb_woa |>
 ### Loading GFDL obsclim Zarr file downloaded from the FishMIP Input Explorer app for the southern Benguela 
 ```{r}
 sb_temp <- file.path(
-  inputpath,
+ "../data",
   "gfdl-mom6-cobalt2_obsclim_thetao_15arcmin_southern-benguela_monthly_1961_2010.zarr")
 ```
-
 ### Exploring zarr file contents
 ```{r }
 zarr_overview(sb_temp)
@@ -237,19 +237,19 @@ sb_gfdl_box <- temp_sb |>
   mutate(layer = case_when(depth < 51 ~ 1, depth > 51 & depth < 101 ~ 2, 
                            depth > 100 & depth < 301 ~ 3, depth > 300 ~ 4)) |>
   left_join(depth_bins, by = "depth") |> 
-  group_by(lon, lat, date, layer) |> 
-  #Calculating depth-weighted average
-  summarise(w_temp = weighted.mean(temperature, depth_height, na.rm = TRUE)) |>
+  #Adding area of grid cell
   left_join(sb_areacello, by = c("lat", "lon")) |>
+  rename(area = vals) |> 
   # Joining cb_mask (data frame identifying the box that each cell belongs to) and the GFDL time series
   full_join(cb_mask, by = c("lat", "lon")) |>
+  #Calculate volume of grid cell
+  mutate(volume = depth_height*area) |> 
   dplyr::select(!standard_name:units) |> 
-  rename(area = vals) |> 
- #Excludes grid cells that are not present in GFDL
-  drop_na(area, w_temp) |> 
+  #Excludes grid cells that are not present in GFDL
+  drop_na(volume, temperature) |> 
   group_by(layer, date, BOX_ID) |>
   #Using area as weights in mean calculation
-  summarise(w_temp_ts = weighted.mean(w_temp, area, na.rm = TRUE)) |>
+  summarise(w_temp_ts = weighted.mean(temperature, volume, na.rm = TRUE)) |>
   arrange(BOX_ID, date)
  
  
@@ -289,10 +289,10 @@ ggplot(aes(date)) +
  head(sb_temp_corr_box, 12)
  
  # Saving datasets
- #outputpath <- "~/Documents/Fish-MIP/ISIMIP3a/Data/output/"  
- #write.csv(sb_temp_corr_box, file.path(outputpath,"sb_temp_corr_box.csv"), row.names = FALSE)
+ #write.csv(sb_temp_corr_box, file.path(output,"sb_temp_corr_box.csv"), row.names = FALSE)
 
 ```
+#Denisse, the code below is the one I use for the figures on our workflow. I dont think they add to the script, so please delete if you think it is best
 
 ### Preparing figures for paper
 
