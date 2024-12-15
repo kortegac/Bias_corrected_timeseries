@@ -94,8 +94,10 @@ sb_gfdl_clims <- sb_gfdl |>
   #Keeping relevant columns only
   dplyr::select(lat:vals) |> 
   rename(temperature = vals) |>
+  #the maximum depth of the southern Benguela Atlantis model is 500 m
   filter(depth < 501) |>
   drop_na(temperature) |>
+  #matching depth bins into the four depth layers of the southern Benguela Atlantis model
   mutate(layer = case_when(depth < 51 ~ 1, depth > 51 & depth < 101 ~ 2, 
                            depth > 100 & depth < 301 ~ 3, depth > 300 ~ 4)) |>
   #Adding height of grid cell
@@ -150,8 +152,10 @@ sb_w_clim_box <- sb_woa |>
   #Keeping relevant columns only
   dplyr::select(lat:vals) |> 
   rename(temperature = vals) |>
+  #the maximum depth of the southern Benguela Atlantis model is 500 m
   filter(depth < 501) |>
   drop_na(temperature) |>
+  #matching depth bins into the four depth layers of the southern Benguela Atlantis model
   mutate(layer = case_when(depth < 51 ~ 1, depth > 51 & depth < 101 ~ 2, 
                            depth > 100 & depth < 301 ~ 3, depth > 300 ~ 4)) |>
   #Adding height of grid cell
@@ -230,10 +234,11 @@ names(temp_sb) <- c("time", "depth", "lat", "lon", "temperature")
 ```{r}
 #Process data from GFDL obsclim 
 sb_gfdl_box <- temp_sb |> 
+  #the maximum depth of the southern Benguela Atlantis model is 500 m
   filter(depth < 501) |> 
   drop_na(temperature) |>
   mutate(date = as.Date("1961-01-01") %m+% months(round(time/30.417, 0))) |>
-  #grouping depth bins into the four depth layers of the southern Benguela Atlantis
+  #matching depth bins into the four depth layers of the southern Benguela Atlantis model
   mutate(layer = case_when(depth < 51 ~ 1, depth > 51 & depth < 101 ~ 2, 
                            depth > 100 & depth < 301 ~ 3, depth > 300 ~ 4)) |>
   left_join(depth_bins, by = "depth") |> 
