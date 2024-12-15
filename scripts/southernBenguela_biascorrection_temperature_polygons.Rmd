@@ -42,7 +42,10 @@ sb_woa <- file.path(
 sb_areacello <- file.path(
   "../data",
   "gfdl-mom6-cobalt2_areacello_15arcmin_southern-benguela_fixed.parquet") |> 
-  read_parquet()
+  read_parquet() |> 
+  #Selecting relevant columns
+  select(lat:vals) |> 
+  rename(area = vals)
 
 # Depth of grid cells
 sb_depth <- file.path(
@@ -73,7 +76,6 @@ sb_gfdl |>
   geom_tile()+
   scale_fill_viridis_c(option = "inferno")+
   facet_wrap(~month)
-
 ```
   
 The plot shows the monthly climatology (1981-2010) of sea surface temperature for the southern Benguela region from the GFDL model. Warmer colours indicate higher temperatures. The warmest months are January to March.  
@@ -89,13 +91,20 @@ depth_bins <- sb_gfdl |>
   #grid cell
   mutate(depth_height = depth-lag(depth, default = 0))
 
+#Checking result
+head(depth_bins)
+```
+  
+The next step is calculating the climatologies between 1981 and 2010.
+  
+```{r}
 # Calculating GFDL climatologies from 1981-2010
 sb_gfdl_clims <- sb_gfdl |>
   #Keeping relevant columns only
-  dplyr::select(lat:vals) |> 
+  select(lat:vals) |> 
   rename(temperature = vals) |>
   #the maximum depth of the southern Benguela Atlantis model is 500 m
-  filter(depth < 501) |>
+  filter(depth <= 500) |>
   drop_na(temperature) |>
   #matching depth bins into the four depth layers of the southern Benguela Atlantis model
   mutate(layer = case_when(depth < 51 ~ 1, depth > 51 & depth < 101 ~ 2, 
@@ -103,30 +112,50 @@ sb_gfdl_clims <- sb_gfdl |>
   #Adding height of grid cell
   left_join(depth_bins, by = "depth") |> 
   #Adding area of grid cell
-  left_join(sb_areacello, by = c("lat", "lon")) |> 
-  rename(area = vals) |> 
+  left_join(sb_areacello, by = c("lat", "lon")) |>
   #Calculate volume of grid cell
-  mutate(volume = depth_height*area) |> 
-  #Keeping relevant columns only
-  dplyr::select(!standard_name:units)
+  mutate(volume = depth_height*area) 
+
+#Checking result
+head(sb_gfdl_clims)
+```
   
+Next, we will turn the above data frame into a grid, which will then be used to create a mask of the different subpolygons of the Southern Benguela region.  
+  
+```{r}
 #Create raster from data frame
 ras <-  sb_gfdl_clims |>
   ungroup() |>  
   #A single date and layer is needed as a sample
   filter(layer == min(layer) & month == min(month)) |> 
   #Only these three columns are needed to create a raster
-  dplyr::select(lon, lat, area) |> 
+  select(lon, lat, area) |> 
   #Create raster
   rast(type = "xyz", crs = "epsg:4326")
 
+#Check result
+plot(ras)
+```
+  
+Now we have a grid of our model, which we can use to rasterise the shapefile of Southern Benguela. We will use the `BOX_ID` column as the identifier for each grid cell.    
+  
+```{r}
 #Create raster mask
-cb_mask <- rasterize(benguela, ras, field = "BOX_ID", background = NA) |> 
+cb_mask <- rasterize(benguela, ras, field = "BOX_ID", fun = max, 
+                     background = NA) |> 
   #Transform to data frame
   as.data.frame(xy = T) |> 
   rename(lon = x, lat = y)
-#This contains a data frame identifying the group that each cell belongs to
 
+#Check results
+cb_mask |> 
+  ggplot(aes(lon, lat, fill = BOX_ID))+
+  geom_raster()
+```
+  
+This contains a data frame identifying the group that each cell belongs to.  
+
+```{r}
 #Join data frames
 sb_gfdl_clims <- sb_gfdl_clims |>
   full_join(cb_mask, by = c("lat", "lon"))
@@ -140,7 +169,10 @@ sb_gfdl_clim_box <- sb_gfdl_clims |>
   #Transforming month column to factor
   mutate(month = factor(month, levels = month.name)) |>
   arrange(as.numeric(BOX_ID),month)
+```
 
+
+```{r}
 #Plotting temperature data for the upper most layer from WOA climatology
 sb_woa |>
   filter(depth == min(depth)) |>
