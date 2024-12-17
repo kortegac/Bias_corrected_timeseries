@@ -137,11 +137,11 @@ ras <-  sb_gfdl_clims |>
 plot(ras)
 ```
   
-Now we have a grid of our model, which we can use to rasterise the shapefile of Southern Benguela. We will use the `BOX_ID` column as the identifier for each grid cell.    
+Now we have a grid of our model, which we can use to rasterise the shapefile of Southern Benguela. We will use the `number` column as the identifier for each grid cell.    
   
 ```{r}
 #Create raster mask
-cb_mask <- rasterize(benguela, ras, field = "BOX_ID", fun = max, 
+cb_mask <- rasterize(benguela, ras, field = "number", fun = max, 
                      background = NA) |> 
   #Transform to data frame
   as.data.frame(xy = T) |> 
@@ -149,7 +149,7 @@ cb_mask <- rasterize(benguela, ras, field = "BOX_ID", fun = max,
 
 #Check results
 cb_mask |> 
-  ggplot(aes(lon, lat, fill = BOX_ID))+
+  ggplot(aes(lon, lat, fill = factor(number)))+
   geom_raster()
 ```
   
@@ -158,17 +158,16 @@ This contains a data frame identifying the group that each cell belongs to.
 ```{r}
 #Join data frames
 sb_gfdl_clims <- sb_gfdl_clims |>
-  full_join(cb_mask, by = c("lat", "lon"))
+  left_join(cb_mask, by = c("lat", "lon"))
 
 #Finalise the data extraction for the model polygons
 sb_gfdl_clim_box <- sb_gfdl_clims |>
-  group_by(layer, month, BOX_ID)|>
+  group_by(layer, month, number)|>
   #Using volume as weights in mean calculation
-  drop_na(temperature) |>
   summarise(w_temp_gfdl = weighted.mean(temperature, volume, na.rm = TRUE)) |> 
   #Transforming month column to factor
   mutate(month = factor(month, levels = month.name)) |>
-  arrange(as.numeric(BOX_ID),month)
+  arrange(as.numeric(number), month)
 ```
 
 
@@ -185,30 +184,29 @@ sb_w_clim_box <- sb_woa |>
   dplyr::select(lat:vals) |> 
   rename(temperature = vals) |>
   #the maximum depth of the southern Benguela Atlantis model is 500 m
-  filter(depth < 501) |>
+  filter(depth <= 500) |>
   drop_na(temperature) |>
   #matching depth bins into the four depth layers of the southern Benguela Atlantis model
   mutate(layer = case_when(depth < 51 ~ 1, depth > 51 & depth < 101 ~ 2, 
                            depth > 100 & depth < 301 ~ 3, depth > 300 ~ 4)) |>
   #Adding height of grid cell
   left_join(depth_bins, by = "depth") |> 
-  group_by(lon, lat, month, layer) |> 
   #Adding area of grid cell
   left_join(sb_areacello, by = c("lat", "lon")) |>
-  rename(area = vals) |> 
   # Joining cb_mask (data frame identifying the box that each cell belongs to) and the WOA dataset
-  full_join(cb_mask, by = c("lat", "lon")) |>
+  left_join(cb_mask, by = c("lat", "lon")) |>
   #Calculate volume of grid cell
   mutate(volume = depth_height*area) |> 
-  dplyr::select(!standard_name:units) |> 
   #Excludes grid cells that are not present in GFDL
   drop_na(volume, temperature) |> 
-  group_by(layer, month, BOX_ID) |>
+  group_by(layer, month, number) |>
   #Using area as weights in mean calculation
   summarise(w_temp_woa = weighted.mean(temperature, volume, na.rm = TRUE)) |>
   #Transforming month column to factor
   mutate(month = factor(month, levels = month.name)) |>
-  arrange(BOX_ID, month)
+  arrange(number, month)
+
+sb_w_clim_box
 ```
 
 ### Loading GFDL obsclim Zarr file downloaded from the FishMIP Input Explorer app for the southern Benguela 
@@ -267,7 +265,7 @@ names(temp_sb) <- c("time", "depth", "lat", "lon", "temperature")
 #Process data from GFDL obsclim 
 sb_gfdl_box <- temp_sb |> 
   #the maximum depth of the southern Benguela Atlantis model is 500 m
-  filter(depth < 501) |> 
+  filter(depth <= 500) |> 
   drop_na(temperature) |>
   mutate(date = as.Date("1961-01-01") %m+% months(round(time/30.417, 0))) |>
   #matching depth bins into the four depth layers of the southern Benguela Atlantis model
@@ -276,7 +274,6 @@ sb_gfdl_box <- temp_sb |>
   left_join(depth_bins, by = "depth") |> 
   #Adding area of grid cell
   left_join(sb_areacello, by = c("lat", "lon")) |>
-  rename(area = vals) |> 
   # Joining cb_mask (data frame identifying the box that each cell belongs to) and the GFDL time series
   full_join(cb_mask, by = c("lat", "lon")) |>
   #Calculate volume of grid cell
@@ -284,15 +281,15 @@ sb_gfdl_box <- temp_sb |>
   dplyr::select(!standard_name:units) |> 
   #Excludes grid cells that are not present in GFDL
   drop_na(volume, temperature) |> 
-  group_by(layer, date, BOX_ID) |>
+  group_by(layer, date, number) |>
   #Using area as weights in mean calculation
   summarise(w_temp_ts = weighted.mean(temperature, volume, na.rm = TRUE)) |>
-  arrange(BOX_ID, date)
+  arrange(number, date)
  
  
 #plot the temperature time series ranging from January 1961 to December 2010
 sb_gfdl_box |>
-  filter(BOX_ID == 0 & layer == 1)|>
+  filter(number == 0 & layer == 1)|>
   ggplot(aes(date, w_temp_ts)) +
   geom_line() +
   labs(y = "Sea temperature 0-50 m depth for box 1 and layer 1") +
@@ -305,14 +302,14 @@ sb_gfdl_box |>
 #Join monthly means with monthly climatologies from GFDL and WOA
 sb_temp_corr_box <- sb_gfdl_box |> 
   mutate(month = factor(month.name[month(date)])) |> 
-  left_join(sb_gfdl_clim_box, by = c("layer", "month", "BOX_ID")) |> 
-  left_join(sb_w_clim_box, by = c("layer", "month", "BOX_ID")) |> 
+  left_join(sb_gfdl_clim_box, by = c("layer", "month", "number")) |> 
+  left_join(sb_w_clim_box, by = c("layer", "month", "number")) |> 
   #Apply correction
-  mutate(corrected_temp = w_temp_ts-w_temp_gfdl+w_temp_woa)
+  mutate(corrected_temp = (w_temp_ts-w_temp_gfdl)+w_temp_woa)
 
 #plot the temperature time series ranging from January 1961 to December 2010
 sb_temp_corr_box |> 
-filter(BOX_ID== 2 & layer ==1) |>
+filter(number== 2 & layer ==1) |>
 ggplot(aes(date)) +
   geom_line(aes(y = corrected_temp), linewidth = 1) +
   geom_line(aes(y = w_temp_ts), color = "red") +
@@ -329,6 +326,15 @@ ggplot(aes(date)) +
  #write.csv(sb_temp_corr_box, file.path(output,"sb_temp_corr_box.csv"), row.names = FALSE)
 
 ```
+
+```{r}
+sb_temp_corr_box |> 
+  arrange(desc(abs(diff)))
+```
+
+If the first row has a difference equal or larger than +/-1 in any layer or polygon, then we need to use the bias corrected temperature (`corrected_temp`).
+
+
 #Denisse, the code below is the one I use for the figures on our workflow. I dont think they add to the script, so please delete if you think it is best
 
 ### Preparing figures for paper
@@ -347,7 +353,7 @@ fig4a <- ggplot(data = benguela) +
 
 #plot the temperature time series ranging from January 1961 to December 2010 for box 4
 box4_l1 <- sb_temp_corr_box |> 
-filter(BOX_ID== 4 & layer ==1) |>
+filter(number== 4 & layer ==1) |>
   ggplot(aes(date)) +
   geom_line(aes(y = corrected_temp), linewidth = 0.8) +
   geom_line(aes(y = w_temp_ts), color = "dodgerblue", linewidth =0.8) +
@@ -359,7 +365,7 @@ filter(BOX_ID== 4 & layer ==1) |>
   theme(plot.title = element_text(hjust = 0.5, face = "bold"),legend.position = "none", panel.grid.minor = element_blank(),panel.grid.major = element_blank()) 
 
 box4_l2 <- sb_temp_corr_box |> 
-  filter(BOX_ID== 4 & layer ==2) |>
+  filter(number== 4 & layer ==2) |>
   ggplot(aes(date)) +
   geom_line(aes(y = corrected_temp), linewidth = 0.8) +
   geom_line(aes(y = w_temp_ts), color = "dodgerblue", linewidth =0.8) +
@@ -373,7 +379,7 @@ fig4b<- plot_grid(box4_l1, box4_l2, nrow =1, align = "h")
 
 #plot the temperature time series ranging from January 1961 to December 2010 for box 4
 box11_l1 <- sb_temp_corr_box |> 
-filter(BOX_ID== 11 & layer ==1) |>
+filter(number== 11 & layer ==1) |>
   ggplot(aes(date)) +
   geom_line(aes(y = corrected_temp), linewidth = 0.8) +
   geom_line(aes(y = w_temp_ts), color = "dodgerblue", linewidth =0.8) +
@@ -384,7 +390,7 @@ filter(BOX_ID== 11 & layer ==1) |>
   theme(plot.title = element_text(hjust = 0.5, face = "bold"),legend.position = "none", panel.grid.minor = element_blank(),panel.grid.major = element_blank()) 
 
 box11_l2 <- sb_temp_corr_box |> 
-  filter(BOX_ID== 11 & layer ==2) |>
+  filter(number== 11 & layer ==2) |>
   ggplot(aes(date)) +
   geom_line(aes(y = corrected_temp), linewidth = 0.8) +
   geom_line(aes(y = w_temp_ts), color = "dodgerblue", linewidth =0.8) +
@@ -395,7 +401,7 @@ box11_l2 <- sb_temp_corr_box |>
   theme(plot.title = element_text(hjust = 0.5, face = "bold"),legend.position = "none", panel.grid.minor = element_blank(),panel.grid.major = element_blank()) 
 
 box11_l3 <- sb_temp_corr_box |> 
-  filter(BOX_ID== 11 & layer ==3) |>
+  filter(number== 11 & layer ==3) |>
   ggplot(aes(date)) +
   geom_line(aes(y = corrected_temp), linewidth = 0.8) +
   geom_line(aes(y = w_temp_ts), color = "dodgerblue", linewidth =0.8) +
@@ -406,7 +412,7 @@ box11_l3 <- sb_temp_corr_box |>
   theme(plot.title = element_text(hjust = 0.5, face = "bold"),legend.position = "none", panel.grid.minor = element_blank(),panel.grid.major = element_blank()) 
 
 box11_l4 <- sb_temp_corr_box |> 
-  filter(BOX_ID== 11 & layer ==4) |>
+  filter(number== 11 & layer ==4) |>
   ggplot(aes(date)) +
   geom_line(aes(y = corrected_temp), linewidth = 0.8) +
   geom_line(aes(y = w_temp_ts), color = "dodgerblue", linewidth =0.8) +
