@@ -1,6 +1,6 @@
 # Bias corrected timeseries
 Scripts to perform bias correction of temperature time series as described in 
-Ortega-Cisneros et al. 2024.  
+Ortega-Cisneros et al. 2024 (Pre-print available [here](https://doi.org/10.22541/essoar.171587234.44707846/v1)).  
   
 The `scripts` folder contains three `Rmarkdown` files describing how to perform
 temperature bias correction under different scenarios, and within two FishMIP
