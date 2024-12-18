@@ -132,7 +132,7 @@ sb_gfdl_clims <- sb_gfdl |>
 head(sb_gfdl_clims)
 ```
   
-Next, we will turn the above data frame into a grid, which will then be used to create a mask of the different subpolygons of the Southern Benguela region.  
+Next, we will turn the above data frame into a grid, which will then be used to create a mask of the different subregions(polygons) of the Southern Benguela region.  
   
 ```{r}
 #Create raster from data frame
@@ -149,7 +149,7 @@ ras <-  sb_gfdl_clims |>
 plot(ras)
 ```
   
-Now we have a grid of our model, which we can use to rasterise the shapefile of Southern Benguela. We are interested in getting information about the subregions contained within Southern Benguela This information is contained in the `number` column of the shapefile.  
+Now we have a grid of our model, which we can use to rasterise the shapefile of the Southern Benguela. We are interested in getting information about the subregions contained within Southern Benguela. This information is contained in the `number` column of the shapefile.  
   
 ```{r}
 #Create raster mask
@@ -165,7 +165,7 @@ cb_mask |>
   geom_raster()
 ```
   
-The result is a gridded product that contains the 18 different subregions contained within Southern Benguela (numbered from 0 to 17). We can now add this information to our monthly climatology data.  
+The result is a gridded product that contains the 18 different subregions contained within the Southern Benguela region (numbered from 0 to 17). We can now add this information to our monthly climatology data.  
   
 ```{r}
 #Add information about subregion
@@ -192,7 +192,7 @@ sb_gfdl_summaries |>
 ```
   
 # Processing WOA monthly climatologies for temperature
-We will apply now follow the same process with the WOA data.  
+We will now follow the same process with the WOA data.  
   
 ```{r}
 #Plotting temperature data for the upper most layer from WOA climatology
@@ -209,7 +209,7 @@ sb_woa |>
 Broad scale patterns are similar to the GFDL monthly climatologies. In both cases, the warmest months are between January and April.  
   
 ```{r}
-# Calculating WOA climatologies from 1981-2010 for the 0-50 m depth layer or realm of this model
+# Calculating WOA climatologies from 1981-2010 for the realm of this model
 sb_woa_summaries <- sb_woa |>
   #Keeping relevant columns only
   select(lat:vals) |> 
