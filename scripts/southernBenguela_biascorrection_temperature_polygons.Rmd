@@ -1,5 +1,5 @@
 ---
-title: "Creating bias-corrected time series of sea temperature"
+title: "Creating bias-corrected time series of ocean temperature"
 author: "Kelly Ortega-Cisneros, Denisse Fierro-Arcos"
 date: "2024-10-24"
 output: pdf_document
